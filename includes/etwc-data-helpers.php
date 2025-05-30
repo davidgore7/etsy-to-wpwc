@@ -36,6 +36,7 @@ function etwc_get_woocommerce_columns_definition() {
 
 /**
  * Lógica principal para generar los datos del CSV de WooCommerce desde el archivo de Etsy.
+ * Incluye la generación de productos padre variables y sus variaciones individuales.
  */
 function etwc_generate_woocommerce_csv_data( $etsy_csv_filepath, $ignore_stock = false ) {
     $digital_product_tags_definition = [ 
@@ -44,7 +45,7 @@ function etwc_generate_woocommerce_csv_data( $etsy_csv_filepath, $ignore_stock =
         "diy_project", "free_stl"
     ];
     $woocommerce_columns = etwc_get_woocommerce_columns_definition();
-    $processed_products_data = [];
+    $processed_products_data = []; // Array para todas las filas (padres y variaciones)
     $etsy_headers = [];
 
     if ( !file_exists($etsy_csv_filepath) || !is_readable($etsy_csv_filepath)) {
@@ -64,29 +65,39 @@ function etwc_generate_woocommerce_csv_data( $etsy_csv_filepath, $ignore_stock =
              if (empty(array_filter($etsy_row_raw)) || count($etsy_row_raw) !== count($etsy_headers)) { 
                  continue; 
              }
-             // Asegurar que no haya problemas si una fila tiene más columnas de las esperadas, aunque fgetcsv debería manejarlo.
-             // Si hay menos, array_combine fallará. La comprobación de count() ya lo maneja.
              $etsy_row = array_combine($etsy_headers, $etsy_row_raw);
              if (empty($etsy_row)) continue;
 
-            $wc_product_row = array_fill_keys( $woocommerce_columns, '' );
+            // --- Fila del Producto Principal/Padre ---
+            $wc_parent_product_row = array_fill_keys( $woocommerce_columns, '' );
 
-            $wc_product_row['Name'] = isset($etsy_row['TITLE']) ? trim($etsy_row['TITLE']) : '';
+            $parent_name = isset($etsy_row['TITLE']) ? trim($etsy_row['TITLE']) : '';
+            $wc_parent_product_row['Name'] = $parent_name;
+            
             $description_content = isset($etsy_row['DESCRIPTION']) ? trim($etsy_row['DESCRIPTION']) : '';
-            $wc_product_row['Description'] = $description_content;
-            $wc_product_row['Short description'] = $description_content;
-            $wc_product_row['Regular price'] = isset($etsy_row['PRICE']) ? trim($etsy_row['PRICE']) : '';
-            $wc_product_row['SKU'] = isset($etsy_row['SKU']) ? trim($etsy_row['SKU']) : '';
+            $wc_parent_product_row['Description'] = $description_content;
+            $wc_parent_product_row['Short description'] = $description_content;
+            
+            $parent_price = isset($etsy_row['PRICE']) ? trim($etsy_row['PRICE']) : '0';
+            $wc_parent_product_row['Regular price'] = $parent_price;
+            
+            $parent_sku_base = isset($etsy_row['SKU']) ? trim($etsy_row['SKU']) : '';
+            if(empty($parent_sku_base)) {
+                // Generar un SKU basado en el título si el SKU de Etsy está vacío
+                $parent_sku_base = 'ETSY-' . sanitize_title(substr($parent_name, 0, 30)) . '-' . dechex(crc32($parent_name . uniqid()));
+            }
+            $wc_parent_product_row['SKU'] = $parent_sku_base;
+
 
             $image_urls = [];
             for ( $i = 1; $i <= 10; $i++ ) {
                 $img_col = "IMAGE{$i}";
                 if ( isset( $etsy_row[$img_col] ) && !empty( trim($etsy_row[$img_col]) ) ) { $image_urls[] = trim( $etsy_row[$img_col] ); }
             }
-            $wc_product_row['Images'] = implode( ',', $image_urls );
+            $wc_parent_product_row['Images'] = implode( ',', $image_urls );
 
             $etsy_tags_str = isset($etsy_row['TAGS']) ? trim($etsy_row['TAGS']) : '';
-            $wc_product_row['Tags'] = $etsy_tags_str;
+            $wc_parent_product_row['Tags'] = $etsy_tags_str;
             
             $is_digital_product = false;
             if ( !empty($etsy_tags_str) ) {
@@ -96,49 +107,162 @@ function etwc_generate_woocommerce_csv_data( $etsy_csv_filepath, $ignore_stock =
                 }
             }
             
-            $var1_name = isset($etsy_row['VARIATION 1 NAME']) ? trim($etsy_row['VARIATION 1 NAME']) : '';
-            $var1_values = isset($etsy_row['VARIATION 1 VALUES']) ? trim($etsy_row['VARIATION 1 VALUES']) : '';
-            $var2_name = isset($etsy_row['VARIATION 2 NAME']) ? trim($etsy_row['VARIATION 2 NAME']) : '';
-            $var2_values = isset($etsy_row['VARIATION 2 VALUES']) ? trim($etsy_row['VARIATION 2 VALUES']) : '';
+            // --- Determinar si es Variable y Procesar Atributos/Variaciones ---
+            $var1_name_etsy = isset($etsy_row['VARIATION 1 NAME']) ? trim($etsy_row['VARIATION 1 NAME']) : '';
+            $var1_values_etsy_str = isset($etsy_row['VARIATION 1 VALUES']) ? trim($etsy_row['VARIATION 1 VALUES']) : '';
+            $var2_name_etsy = isset($etsy_row['VARIATION 2 NAME']) ? trim($etsy_row['VARIATION 2 NAME']) : '';
+            $var2_values_etsy_str = isset($etsy_row['VARIATION 2 VALUES']) ? trim($etsy_row['VARIATION 2 VALUES']) : '';
 
-            if ( !empty($var1_name) ) {
-                $wc_product_row['Type'] = 'variable';
-                $wc_product_row['Attribute 1 name'] = $var1_name; $wc_product_row['Attribute 1 value(s)'] = $var1_values;
-                $wc_product_row['Attribute 1 visible'] = '1'; $wc_product_row['Attribute 1 global'] = '1';
-                if ( !empty($var2_name) ) {
-                    $wc_product_row['Attribute 2 name'] = $var2_name; $wc_product_row['Attribute 2 value(s)'] = $var2_values;
-                    $wc_product_row['Attribute 2 visible'] = '1'; $wc_product_row['Attribute 2 global'] = '1';
-                }
-            } else { $wc_product_row['Type'] = 'simple'; }
+            $is_variable_product = !empty($var1_name_etsy) && !empty($var1_values_etsy_str);
 
-            $etsy_quantity_str = isset($etsy_row['QUANTITY']) ? trim($etsy_row['QUANTITY']) : '';
-            $etsy_quantity = 0;
-            if (ctype_digit($etsy_quantity_str)) { $etsy_quantity = intval($etsy_quantity_str); }
+            if ($is_variable_product) {
+                $wc_parent_product_row['Type'] = 'variable';
 
-            if ( $is_digital_product ) {
-                $wc_product_row['Downloadable'] = '1'; $wc_product_row['Virtual'] = '1';
-            } else {
-                $wc_product_row['Downloadable'] = '0'; $wc_product_row['Virtual'] = '0';
-            }
-
-            if ( $ignore_stock ) {
-                $wc_product_row['Stock'] = ''; $wc_product_row['In stock?'] = '1';
-            } else { 
-                if ( $is_digital_product ) {
-                    $wc_product_row['Stock'] = ''; $wc_product_row['In stock?'] = '1'; 
+                $var1_values_arr = array_filter(array_map('trim', explode(',', $var1_values_etsy_str)));
+                if (empty($var1_values_arr)) { // Si después de limpiar, el array está vacío, tratar como simple.
+                    $is_variable_product = false; 
+                    // Revertir a simple si no hay valores válidos para la variación principal
+                    $wc_parent_product_row['Type'] = 'simple'; 
                 } else {
-                    $wc_product_row['Stock'] = $etsy_quantity_str;
-                    $wc_product_row['In stock?'] = ( $etsy_quantity > 0 ) ? '1' : '0';
+                    $wc_parent_product_row['Attribute 1 name'] = $var1_name_etsy;
+                    $wc_parent_product_row['Attribute 1 value(s)'] = implode(' , ', $var1_values_arr); // Usar valores limpios
+                    $wc_parent_product_row['Attribute 1 visible'] = '1';
+                    $wc_parent_product_row['Attribute 1 global'] = '1';
+                }
+
+                $var2_values_arr = [];
+                if ($is_variable_product && !empty($var2_name_etsy) && !empty($var2_values_etsy_str)) {
+                    $var2_values_arr = array_filter(array_map('trim', explode(',', $var2_values_etsy_str)));
+                    if (!empty($var2_values_arr)) {
+                        $wc_parent_product_row['Attribute 2 name'] = $var2_name_etsy;
+                        $wc_parent_product_row['Attribute 2 value(s)'] = implode(' , ', $var2_values_arr);
+                        $wc_parent_product_row['Attribute 2 visible'] = '1';
+                        $wc_parent_product_row['Attribute 2 global'] = '1';
+                    } else {
+                        // Si el atributo 2 no tiene valores válidos, se ignora
+                        $var2_name_etsy = ''; // Limpiar para que no se procesen variaciones vacías para attr2
+                    }
+                }
+                
+                // Stock para el producto padre variable (generalmente no se gestiona aquí directamente)
+                $wc_parent_product_row['Stock'] = ''; // Los padres variables no suelen tener stock propio gestionable así
+                $wc_parent_product_row['In stock?'] = '1'; // Asumir que el padre está en stock si tiene variaciones activas
+
+            } 
+            
+            // Si después de comprobar variaciones resulta que no es variable (o era simple desde el inicio)
+            if (!$is_variable_product) { 
+                $wc_parent_product_row['Type'] = 'simple';
+                // Lógica de stock para productos simples
+                $etsy_quantity_str = isset($etsy_row['QUANTITY']) ? trim($etsy_row['QUANTITY']) : '';
+                $etsy_quantity = 0;
+                if (ctype_digit($etsy_quantity_str)) { $etsy_quantity = intval($etsy_quantity_str); }
+
+                if ($is_digital_product) {
+                    $wc_parent_product_row['Downloadable'] = '1'; $wc_parent_product_row['Virtual'] = '1';
+                } else {
+                    $wc_parent_product_row['Downloadable'] = '0'; $wc_parent_product_row['Virtual'] = '0';
+                }
+
+                if ($ignore_stock) {
+                    $wc_parent_product_row['Stock'] = ''; $wc_parent_product_row['In stock?'] = '1';
+                } else { 
+                    if ($is_digital_product) {
+                        $wc_parent_product_row['Stock'] = ''; $wc_parent_product_row['In stock?'] = '1'; 
+                    } else {
+                        $wc_parent_product_row['Stock'] = $etsy_quantity_str;
+                        $wc_parent_product_row['In stock?'] = ( $etsy_quantity > 0 ) ? '1' : '0';
+                    }
                 }
             }
             
-            $wc_product_row['ID'] = ''; $wc_product_row['Published'] = '1'; $wc_product_row['Is featured?'] = '0';
-            $wc_product_row['Visibility in catalog'] = 'visible'; $wc_product_row['Tax status'] = 'taxable';
-            $wc_product_row['Backorders allowed?'] = '0'; $wc_product_row['Sold individually?'] = '0';
-            $wc_product_row['Allow customer reviews?'] = '1'; $wc_product_row['Position'] = '0';
+            // Campos comunes para el producto padre/simple
+            $wc_parent_product_row['ID'] = ''; 
+            $wc_parent_product_row['Published'] = '1'; 
+            $wc_parent_product_row['Is featured?'] = '0';
+            $wc_parent_product_row['Visibility in catalog'] = 'visible'; 
+            $wc_parent_product_row['Tax status'] = 'taxable';
+            $wc_parent_product_row['Backorders allowed?'] = '0'; 
+            $wc_parent_product_row['Sold individually?'] = '0';
+            $wc_parent_product_row['Allow customer reviews?'] = '1'; 
+            $wc_parent_product_row['Position'] = '0';
+            
+            $processed_products_data[] = $wc_parent_product_row;
 
-            $processed_products_data[] = $wc_product_row;
-        }
+            // --- Generar Filas de Variaciones (si es producto variable válido) ---
+            if ($is_variable_product && !empty($var1_values_arr)) { // Asegurarse que hay valores para el primer atributo
+                $combinations = [];
+                if (!empty($var2_values_arr) && !empty($var2_name_etsy)) { // Dos atributos con valores
+                    foreach ($var1_values_arr as $val1) {
+                        foreach ($var2_values_arr as $val2) {
+                            $combinations[] = [$val1, $val2];
+                        }
+                    }
+                } else { // Un solo atributo
+                    foreach ($var1_values_arr as $val1) {
+                        $combinations[] = [$val1];
+                    }
+                }
+
+                foreach($combinations as $combo) {
+                    $val1 = $combo[0];
+                    $val2 = isset($combo[1]) ? $combo[1] : null;
+
+                    $variation_row = array_fill_keys( $woocommerce_columns, '' );
+                    $variation_row['Type'] = 'variation';
+                    $variation_row['Parent'] = $parent_sku_base; // Usar el SKU base del padre
+                    
+                    $sku_suffix = '-' . sanitize_title(substr($val1, 0, 25));
+                    if ($val2 !== null) {
+                        $sku_suffix .= '-' . sanitize_title(substr($val2, 0, 25));
+                    }
+                    $variation_row['SKU'] = $parent_sku_base . $sku_suffix;
+                    // Asegurar que el SKU de la variación no sea excesivamente largo
+                    if (strlen($variation_row['SKU']) > 100) { // Límite típico de BD para SKU
+                        $variation_row['SKU'] = substr($parent_sku_base, 0, 40) . $sku_suffix;
+                         if (strlen($variation_row['SKU']) > 100) {
+                             $variation_row['SKU'] = substr($variation_row['SKU'],0,99);
+                         }
+                    }
+
+
+                    $variation_name = $parent_name . ' - ' . $val1;
+                    if ($val2 !== null) {
+                        $variation_name .= ' - ' . $val2;
+                    }
+                    $variation_row['Name'] = $variation_name;
+
+                    $variation_row['Published'] = '1';
+                    $variation_row['Visibility in catalog'] = 'visible'; 
+                    $variation_row['Regular price'] = $parent_price; 
+                    
+                    $variation_row['Attribute 1 name'] = $var1_name_etsy;
+                    $variation_row['Attribute 1 value(s)'] = $val1; 
+                    $variation_row['Attribute 1 visible'] = '0'; 
+                    $variation_row['Attribute 1 global'] = '1';
+
+                    if ($val2 !== null && !empty($var2_name_etsy)) {
+                        $variation_row['Attribute 2 name'] = $var2_name_etsy;
+                        $variation_row['Attribute 2 value(s)'] = $val2; 
+                        $variation_row['Attribute 2 visible'] = '0';
+                        $variation_row['Attribute 2 global'] = '1';
+                    }
+
+                    // Stock para la variación individual
+                    $variation_row['Stock'] = '';       // Vacío, según lo acordado
+                    $variation_row['In stock?'] = '1';  // En stock, sin seguimiento de cantidad
+
+                    // Campos que suelen heredar o estar vacíos para variaciones
+                    $variation_row['Categories'] = ''; $variation_row['Tags'] = ''; $variation_row['Images'] = '';
+                    $variation_row['Description'] = ''; $variation_row['Short description'] = '';
+                    $variation_row['Tax status'] = ''; $variation_row['Tax class'] = ''; // Hereda del padre
+                    $variation_row['Downloadable'] = $wc_parent_product_row['Downloadable']; // Hereda si el padre es digital
+                    $variation_row['Virtual'] = $wc_parent_product_row['Virtual'];       // Hereda si el padre es virtual
+
+                    $processed_products_data[] = $variation_row;
+                }
+            } 
+        } // Fin while
         fclose( $handle );
     } else {
         error_log("ETWC Plugin: No se pudo abrir el archivo CSV de Etsy en: " . $etsy_csv_filepath);
@@ -149,19 +273,15 @@ function etwc_generate_woocommerce_csv_data( $etsy_csv_filepath, $ignore_stock =
 
 /**
  * Placeholder: Simula la obtención de listados de la API de Etsy.
+ * (Esta función se mantiene igual que en la v1.3.2, ya que la pregunta actual es sobre el CSV)
  */
 function etwc_fetch_etsy_listings_via_api_placeholder($api_credentials) {
     $client_id = isset($api_credentials['client_id']) ? $api_credentials['client_id'] : null;
     $access_token = isset($api_credentials['access_token']) ? $api_credentials['access_token'] : null;
 
     if (empty($access_token)) {
-        // En una implementación real, aquí intentarías refrescar el token o indicarías al usuario que re-autorice.
         error_log("ETWC API Placeholder: Se intentó obtener listados sin un access_token (simulado).");
-        // Para la simulación, podríamos devolver un error o seguir con datos de ejemplo.
-        // Devolver un array vacío si no hay token simulado puede ser más realista para el flujo de error.
-        // return []; 
     }
-     // Devolvemos los mismos datos de ejemplo:
     return [
         [
             'listing_id' => 123, 'title' => 'Producto API de Ejemplo 1 (Taza)', 'description' => 'Descripción API taza.',
@@ -180,6 +300,7 @@ function etwc_fetch_etsy_listings_via_api_placeholder($api_credentials) {
 
 /**
  * Placeholder: Transforma los datos "API" de ejemplo al formato WooCommerce CSV.
+ * (Esta función se mantiene igual que en la v1.3.2)
  */
 function etwc_transform_api_data_to_wc_format_placeholder($api_listings, $ignore_stock = false) {
     $digital_product_tags_definition = [
@@ -189,7 +310,7 @@ function etwc_transform_api_data_to_wc_format_placeholder($api_listings, $ignore
     $woocommerce_columns = etwc_get_woocommerce_columns_definition();
     $processed_products = [];
 
-    if (!is_array($api_listings)) { // Comprobación por si $api_listings no es un array
+    if (!is_array($api_listings)) { 
         return ['headers' => $woocommerce_columns, 'products' => []];
     }
 
